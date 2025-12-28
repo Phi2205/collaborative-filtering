@@ -405,6 +405,33 @@ class CollaborativeFiltering:
         
         return normalized_score + user_mean
     
+    def _has_paid_interaction(self, user_id: int, tour_id: int) -> bool:
+        """
+        Kiểm tra xem user đã có interaction "paid" với tour chưa
+        
+        Args:
+            user_id: ID của user
+            tour_id: ID của tour
+            
+        Returns:
+            True nếu user đã "paid" tour, False nếu chưa
+        """
+        if not self.interactions_cache:
+            return False
+        
+        key = (user_id, tour_id)
+        if key not in self.interactions_cache:
+            return False
+        
+        # Kiểm tra xem có interaction type "paid" không
+        interactions = self.interactions_cache[key]
+        for interaction in interactions:
+            interaction_type = interaction.get('type', '').lower() if interaction.get('type') else ''
+            if interaction_type == 'paid':
+                return True
+        
+        return False
+    
     def calculate_user_similarity(self, force_recalculate: bool = False) -> np.ndarray:
         """
         Tính toán độ tương đồng giữa các users (User-Based CF)
@@ -487,47 +514,53 @@ class CollaborativeFiltering:
         predicted_scores = np.zeros(len(self.tour_ids))
         
         for tour_idx in range(len(self.tour_ids)):
-            if user_ratings[tour_idx] == 0:  # Chỉ gợi ý tours user chưa tương tác
-                # Tính điểm dự đoán dựa trên users tương tự
-                similar_users_ratings = self.user_tour_matrix[similar_users_idx, tour_idx]
-                similar_users_sim = self.user_similarity[user_idx, similar_users_idx]
-                
-                # Weighted average
-                if np.sum(similar_users_sim) > 0:
-                    predicted_scores[tour_idx] = np.sum(
-                        similar_users_ratings * similar_users_sim
-                    ) / np.sum(similar_users_sim)
-                else:
-                    # Fallback: Co-occurrence logic khi similarity = 0
-                    # Dùng raw matrix (không normalize) để tìm interacted tours
-                    # Vì normalized matrix có thể làm mất interacted tours
-                    raw_matrix = self.user_tour_matrix_raw if self.user_tour_matrix_raw is not None else self.user_tour_matrix
-                    user_raw_ratings = raw_matrix[user_idx]
-                    interacted_tours_idx = np.where(user_raw_ratings > 0)[0]
-                    if len(interacted_tours_idx) > 0:
-                        # Tìm users đã xem cùng tours
-                        co_occurrence_score = 0
-                        for interacted_tour_idx in interacted_tours_idx:
-                            users_who_saw_this_tour = np.where(
-                                raw_matrix[:, interacted_tour_idx] > 0
-                            )[0]
-                            # Loại bỏ chính user hiện tại
-                            users_who_saw_this_tour = users_who_saw_this_tour[
-                                users_who_saw_this_tour != user_idx
+            tour_id = self.tour_ids[tour_idx]
+            
+            # Chỉ loại bỏ tours đã "paid", không loại bỏ tours chỉ "view" hoặc "book"
+            if self._has_paid_interaction(user_id, tour_id):
+                continue  # Bỏ qua tours đã paid
+            
+            # Tính điểm cho tours chưa paid (có thể đã view/book nhưng chưa paid)
+            # Tính điểm dự đoán dựa trên users tương tự
+            similar_users_ratings = self.user_tour_matrix[similar_users_idx, tour_idx]
+            similar_users_sim = self.user_similarity[user_idx, similar_users_idx]
+            
+            # Weighted average
+            if np.sum(similar_users_sim) > 0:
+                predicted_scores[tour_idx] = np.sum(
+                    similar_users_ratings * similar_users_sim
+                ) / np.sum(similar_users_sim)
+            else:
+                # Fallback: Co-occurrence logic khi similarity = 0
+                # Dùng raw matrix (không normalize) để tìm interacted tours
+                # Vì normalized matrix có thể làm mất interacted tours
+                raw_matrix = self.user_tour_matrix_raw if self.user_tour_matrix_raw is not None else self.user_tour_matrix
+                user_raw_ratings = raw_matrix[user_idx]
+                interacted_tours_idx = np.where(user_raw_ratings > 0)[0]
+                if len(interacted_tours_idx) > 0:
+                    # Tìm users đã xem cùng tours
+                    co_occurrence_score = 0
+                    for interacted_tour_idx in interacted_tours_idx:
+                        users_who_saw_this_tour = np.where(
+                            raw_matrix[:, interacted_tour_idx] > 0
+                        )[0]
+                        # Loại bỏ chính user hiện tại
+                        users_who_saw_this_tour = users_who_saw_this_tour[
+                            users_who_saw_this_tour != user_idx
+                        ]
+                        # Xem những users này có xem tour hiện tại không
+                        if len(users_who_saw_this_tour) > 0:
+                            ratings_from_co_users = raw_matrix[
+                                users_who_saw_this_tour, tour_idx
                             ]
-                            # Xem những users này có xem tour hiện tại không
-                            if len(users_who_saw_this_tour) > 0:
-                                ratings_from_co_users = raw_matrix[
-                                    users_who_saw_this_tour, tour_idx
-                                ]
-                                if np.sum(ratings_from_co_users) > 0:
-                                    # Tính điểm dựa trên số users cùng xem và ratings
-                                    co_occurrence_score += np.mean(
-                                        ratings_from_co_users[ratings_from_co_users > 0]
-                                    ) * len(ratings_from_co_users[ratings_from_co_users > 0])
-                        
-                        if co_occurrence_score > 0:
-                            predicted_scores[tour_idx] = co_occurrence_score / len(interacted_tours_idx)
+                            if np.sum(ratings_from_co_users) > 0:
+                                # Tính điểm dựa trên số users cùng xem và ratings
+                                co_occurrence_score += np.mean(
+                                    ratings_from_co_users[ratings_from_co_users > 0]
+                                ) * len(ratings_from_co_users[ratings_from_co_users > 0])
+                    
+                    if co_occurrence_score > 0:
+                        predicted_scores[tour_idx] = co_occurrence_score / len(interacted_tours_idx)
         
         # Lấy top N recommendations
         top_tours_idx = np.argsort(predicted_scores)[::-1][:n_recommendations * 2]  # Lấy nhiều hơn để apply diversity
@@ -581,49 +614,55 @@ class CollaborativeFiltering:
         predicted_scores = np.zeros(len(self.tour_ids))
         
         for tour_idx in range(len(self.tour_ids)):
-            if user_ratings[tour_idx] == 0:  # Chỉ gợi ý tours user chưa tương tác
-                # Tính điểm dựa trên tours user đã tương tác
-                interacted_tours_idx = np.where(user_ratings > 0)[0]
+            tour_id = self.tour_ids[tour_idx]
+            
+            # Chỉ loại bỏ tours đã "paid", không loại bỏ tours chỉ "view" hoặc "book"
+            if self._has_paid_interaction(user_id, tour_id):
+                continue  # Bỏ qua tours đã paid
+            
+            # Tính điểm cho tours chưa paid (có thể đã view/book nhưng chưa paid)
+            # Tính điểm dựa trên tours user đã tương tác
+            interacted_tours_idx = np.where(user_ratings > 0)[0]
+            
+            if len(interacted_tours_idx) > 0:
+                similarities = self.tour_similarity[tour_idx, interacted_tours_idx]
+                ratings = user_ratings[interacted_tours_idx]
                 
-                if len(interacted_tours_idx) > 0:
-                    similarities = self.tour_similarity[tour_idx, interacted_tours_idx]
-                    ratings = user_ratings[interacted_tours_idx]
+                if np.sum(similarities) > 0:
+                    predicted_scores[tour_idx] = np.sum(
+                        similarities * ratings
+                    ) / np.sum(similarities)
+                else:
+                    # Fallback: Co-occurrence logic khi similarity = 0
+                    # Dùng raw matrix (không normalize) để tìm interacted tours
+                    raw_matrix = self.user_tour_matrix_raw if self.user_tour_matrix_raw is not None else self.user_tour_matrix
+                    user_raw_ratings = raw_matrix[user_idx]
+                    interacted_tours_idx_raw = np.where(user_raw_ratings > 0)[0]
                     
-                    if np.sum(similarities) > 0:
-                        predicted_scores[tour_idx] = np.sum(
-                            similarities * ratings
-                        ) / np.sum(similarities)
-                    else:
-                        # Fallback: Co-occurrence logic khi similarity = 0
-                        # Dùng raw matrix (không normalize) để tìm interacted tours
-                        raw_matrix = self.user_tour_matrix_raw if self.user_tour_matrix_raw is not None else self.user_tour_matrix
-                        user_raw_ratings = raw_matrix[user_idx]
-                        interacted_tours_idx_raw = np.where(user_raw_ratings > 0)[0]
-                        
-                        # Tìm users đã xem tours user đã xem, xem họ có xem tour này không
-                        co_occurrence_score = 0
-                        for interacted_tour_idx in interacted_tours_idx_raw:
-                            # Tìm users đã xem tour này
-                            users_who_saw_this_tour = np.where(
-                                raw_matrix[:, interacted_tour_idx] > 0
-                            )[0]
-                            # Loại bỏ chính user hiện tại
-                            users_who_saw_this_tour = users_who_saw_this_tour[
-                                users_who_saw_this_tour != user_idx
+                    # Tìm users đã xem tours user đã xem, xem họ có xem tour này không
+                    co_occurrence_score = 0
+                    for interacted_tour_idx in interacted_tours_idx_raw:
+                        # Tìm users đã xem tour này
+                        users_who_saw_this_tour = np.where(
+                            raw_matrix[:, interacted_tour_idx] > 0
+                        )[0]
+                        # Loại bỏ chính user hiện tại
+                        users_who_saw_this_tour = users_who_saw_this_tour[
+                            users_who_saw_this_tour != user_idx
+                        ]
+                        # Xem những users này có xem tour hiện tại không
+                        if len(users_who_saw_this_tour) > 0:
+                            ratings_from_co_users = raw_matrix[
+                                users_who_saw_this_tour, tour_idx
                             ]
-                            # Xem những users này có xem tour hiện tại không
-                            if len(users_who_saw_this_tour) > 0:
-                                ratings_from_co_users = raw_matrix[
-                                    users_who_saw_this_tour, tour_idx
-                                ]
-                                if np.sum(ratings_from_co_users) > 0:
-                                    # Tính điểm dựa trên số users cùng xem và ratings
-                                    co_occurrence_score += np.mean(
-                                        ratings_from_co_users[ratings_from_co_users > 0]
-                                    ) * len(ratings_from_co_users[ratings_from_co_users > 0])
-                        
-                        if co_occurrence_score > 0:
-                            predicted_scores[tour_idx] = co_occurrence_score / len(interacted_tours_idx)
+                            if np.sum(ratings_from_co_users) > 0:
+                                # Tính điểm dựa trên số users cùng xem và ratings
+                                co_occurrence_score += np.mean(
+                                    ratings_from_co_users[ratings_from_co_users > 0]
+                                ) * len(ratings_from_co_users[ratings_from_co_users > 0])
+                    
+                    if co_occurrence_score > 0:
+                        predicted_scores[tour_idx] = co_occurrence_score / len(interacted_tours_idx)
         
         # Lấy top N recommendations
         top_tours_idx = np.argsort(predicted_scores)[::-1][:n_recommendations * 2]  # Lấy nhiều hơn để apply diversity
