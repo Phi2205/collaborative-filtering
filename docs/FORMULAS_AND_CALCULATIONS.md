@@ -16,7 +16,8 @@ Tài liệu này mô tả chi tiết các công thức toán học được sử
 8. [Hybrid Collaborative Filtering](#8-hybrid-collaborative-filtering)
 9. [Diversity (Maximal Marginal Relevance - MMR)](#9-diversity-maximal-marginal-relevance-mmr)
 10. [Fallback Co-occurrence Logic](#10-fallback-co-occurrence-logic)
-11. [Ví Dụ Tính Toán Đầy Đủ](#11-ví-dụ-tính-toán-đầy-đủ)
+11. [Filtering Tours Đã Xem (Loại Bỏ Hoàn Toàn)](#11-filtering-tours-đã-xem-loại-bỏ-hoàn-toàn)
+12. [Ví Dụ Tính Toán Đầy Đủ](#12-ví-dụ-tính-toán-đầy-đủ)
 
 ---
 
@@ -228,6 +229,8 @@ Trong đó:
 - `rating[k, j]`: Điểm của user `k` cho tour `j`
 - Tổng chỉ tính trên các users `k` đã tương tác với tour `j`
 
+**⚠️ Lưu ý quan trọng:** Tours đã xem bị **LOẠI BỎ HOÀN TOÀN** khỏi recommendations (không phải giảm điểm dần). Nếu `user_ratings[i, j] != 0` (user đã tương tác với tour), thì `predicted_score[i, j] = 0` và tour đó sẽ không xuất hiện trong danh sách gợi ý.
+
 ### Ví Dụ Tính Toán
 
 **Dữ liệu:**
@@ -263,6 +266,8 @@ Trong đó:
 - `similarity[j, k]`: Độ tương đồng giữa tour `j` và tour `k`
 - `rating[i, k]`: Điểm của user `i` cho tour `k`
 - Tổng chỉ tính trên các tours `k` mà user `i` đã tương tác
+
+**⚠️ Lưu ý quan trọng:** Tours đã xem bị **LOẠI BỎ HOÀN TOÀN** khỏi recommendations (không phải giảm điểm dần). Nếu `user_ratings[i, j] != 0` (user đã tương tác với tour), thì `predicted_score[i, j] = 0` và tour đó sẽ không xuất hiện trong danh sách gợi ý.
 
 ### Ví Dụ Tính Toán
 
@@ -392,7 +397,124 @@ co_occurrence_score[Tour2] =
 
 ---
 
-## 11. Ví Dụ Tính Toán Đầy Đủ
+## 11. Filtering Tours Đã Xem (Loại Bỏ Hoàn Toàn)
+
+### Cơ Chế
+
+Hệ thống **KHÔNG** giảm điểm dần cho tours đã xem. Thay vào đó, **tours đã xem bị loại bỏ hoàn toàn** khỏi danh sách recommendations.
+
+### Công Thức Logic
+
+```python
+# Chỉ tính điểm cho tours user CHƯA tương tác
+if user_ratings[tour_idx] == 0:  # Chưa tương tác
+    predicted_scores[tour_idx] = calculate_score(...)  # Tính điểm
+else:  # Đã tương tác (view, book, paid, rating, ...)
+    predicted_scores[tour_idx] = 0  # Loại bỏ hoàn toàn
+```
+
+### Ví Dụ
+
+**Tình huống:**
+- User1 đã xem Tour1 (score = 4.0)
+- User1 đã book Tour2 (score = 5.0)
+- User1 chưa xem Tour3
+
+**Kết quả:**
+- Tour1: `predicted_score = 0` → **KHÔNG** xuất hiện trong recommendations
+- Tour2: `predicted_score = 0` → **KHÔNG** xuất hiện trong recommendations
+- Tour3: `predicted_score = 4.5` → **CÓ** xuất hiện trong recommendations
+
+### Lý Do
+
+1. **Tránh gợi ý lại:** User đã xem/book tour rồi, không cần gợi ý lại.
+2. **Tập trung vào tours mới:** Chỉ gợi ý những tours user chưa biết.
+3. **Tăng trải nghiệm:** User không bị làm phiền bởi những tours đã xem.
+
+### So Sánh: Giảm Điểm vs Loại Bỏ
+
+| Phương Pháp | Cách Hoạt Động | Ưu Điểm | Nhược Điểm |
+|-------------|----------------|---------|------------|
+| **Giảm điểm dần** | Tours đã xem vẫn có điểm, nhưng thấp hơn | Có thể gợi ý lại nếu user muốn xem lại | Làm phiền user với tours đã xem |
+| **Loại bỏ hoàn toàn** (hiện tại) | Tours đã xem có điểm = 0, không xuất hiện | Tập trung vào tours mới, trải nghiệm tốt hơn | Không thể gợi ý lại tours đã xem |
+
+**Hệ thống hiện tại sử dụng phương pháp "Loại bỏ hoàn toàn".**
+
+### ⚠️ Vấn Đề: Vĩnh Viễn Không Gợi Ý Lại
+
+**Hiện tại:** Một khi user đã có bất kỳ tương tác nào với tour (view, book, paid, rating), tour đó sẽ **VĨNH VIỄN** không xuất hiện trong recommendations nữa.
+
+**Vấn đề này có thể gây ra:**
+1. **User chỉ "view" nhưng muốn book lại:** User xem tour nhưng chưa book, sau đó muốn tìm lại để book → không tìm thấy trong recommendations.
+2. **User muốn book lại tour đã từng xem:** Tour phù hợp nhưng đã xem trước đó → không được gợi ý.
+3. **Không có cơ hội "rediscovery":** Tours tốt nhưng đã xem lâu rồi không được gợi ý lại.
+
+### 💡 Giải Pháp Đề Xuất
+
+Có thể cải thiện bằng các cách sau:
+
+#### **Giải pháp 1: Chỉ loại bỏ tours đã "paid"**
+```python
+# Chỉ loại bỏ tours đã thanh toán (paid)
+if user_ratings[tour_idx] == 0 or is_paid_only(tour_idx):
+    predicted_scores[tour_idx] = calculate_score(...)
+```
+- ✅ Cho phép gợi ý lại tours chỉ "view" hoặc "book" nhưng chưa "paid"
+- ✅ Vẫn loại bỏ tours đã thanh toán (không cần book lại)
+
+#### **Giải pháp 2: Time-based re-recommendation**
+```python
+# Gợi ý lại tours đã xem sau một thời gian (ví dụ: 90 ngày)
+if user_ratings[tour_idx] == 0 or is_old_interaction(tour_idx, days=90):
+    predicted_scores[tour_idx] = calculate_score(...)
+```
+- ✅ Cho phép "rediscovery" sau một thời gian
+- ✅ Tours cũ có thể được gợi ý lại nếu vẫn phù hợp
+
+#### **Giải pháp 3: Giảm điểm thay vì loại bỏ**
+```python
+# Giảm điểm cho tours đã xem thay vì loại bỏ hoàn toàn
+if user_ratings[tour_idx] == 0:
+    predicted_scores[tour_idx] = calculate_score(...)
+else:
+    # Giảm điểm dựa trên loại tương tác
+    penalty = get_interaction_penalty(user_ratings[tour_idx])
+    predicted_scores[tour_idx] = calculate_score(...) * penalty
+```
+- ✅ Vẫn có thể gợi ý lại nhưng với điểm thấp hơn
+- ✅ Tours đã "paid" có penalty cao nhất (gần như loại bỏ)
+
+#### **Giải pháp 4: Filter theo loại tương tác**
+```python
+# Chỉ loại bỏ tours đã "paid" hoặc "book"
+interaction_type = get_interaction_type(user_id, tour_idx)
+if interaction_type not in ['paid', 'book']:
+    predicted_scores[tour_idx] = calculate_score(...)
+```
+- ✅ Cho phép gợi ý lại tours chỉ "view"
+- ✅ Loại bỏ tours đã "book" hoặc "paid"
+
+### 📊 So Sánh Các Giải Pháp
+
+| Giải Pháp | Tours "view" | Tours "book" | Tours "paid" | Độ Phức Tạp |
+|-----------|--------------|--------------|--------------|--------------|
+| **Hiện tại (Loại bỏ hoàn toàn)** | ❌ Không gợi ý | ❌ Không gợi ý | ❌ Không gợi ý | ⭐ Đơn giản |
+| **Chỉ loại bỏ "paid"** | ✅ Có gợi ý | ✅ Có gợi ý | ❌ Không gợi ý | ⭐⭐ Trung bình |
+| **Time-based (90 ngày)** | ✅ Có gợi ý lại | ✅ Có gợi ý lại | ✅ Có gợi ý lại | ⭐⭐⭐ Phức tạp |
+| **Giảm điểm** | ✅ Gợi ý (điểm thấp) | ✅ Gợi ý (điểm thấp) | ✅ Gợi ý (điểm rất thấp) | ⭐⭐⭐ Phức tạp |
+| **Filter theo loại** | ✅ Có gợi ý | ❌ Không gợi ý | ❌ Không gợi ý | ⭐⭐ Trung bình |
+
+### 🎯 Khuyến Nghị
+
+**Nên sử dụng "Giải pháp 1" hoặc "Giải pháp 4":**
+- ✅ Đơn giản, dễ implement
+- ✅ Cho phép gợi ý lại tours chỉ "view" (user có thể muốn book)
+- ✅ Vẫn loại bỏ tours đã "paid" (không cần book lại)
+- ✅ Cân bằng giữa trải nghiệm và logic nghiệp vụ
+
+---
+
+## 12. Ví Dụ Tính Toán Đầy Đủ
 
 ### Tình Huống
 
@@ -545,15 +667,22 @@ hybrid_score = 0.5 × 5.61 + 0.5 × 6.69
 
 ## Lưu Ý Quan Trọng
 
-1. **Normalization có thể làm mất thông tin:** Khi user chỉ có 1 interaction, vector normalized có thể thành toàn 0 → cần dùng raw matrix cho fallback.
+1. **Tours đã xem bị loại bỏ hoàn toàn:** Hệ thống **KHÔNG** giảm điểm dần cho tours đã xem. Thay vào đó, nếu user đã tương tác với tour (view, book, paid, rating), tour đó sẽ có `predicted_score = 0` và **KHÔNG xuất hiện** trong danh sách recommendations. Logic này được áp dụng ở cả User-Based và Tour-Based CF:
+   ```python
+   if user_ratings[tour_idx] == 0:  # Chỉ tính điểm cho tours chưa tương tác
+       predicted_scores[tour_idx] = ...  # Tính điểm
+   # Nếu != 0 (đã tương tác), predicted_scores[tour_idx] = 0 (mặc định)
+   ```
 
-2. **Time Decay giảm dần theo thời gian:** Tương tác càng cũ, trọng số càng thấp.
+2. **Normalization có thể làm mất thông tin:** Khi user chỉ có 1 interaction, vector normalized có thể thành toàn 0 → cần dùng raw matrix cho fallback.
 
-3. **Diversity giảm điểm cho tours quá giống nhau:** Giúp recommendations đa dạng hơn.
+3. **Time Decay giảm dần theo thời gian:** Tương tác càng cũ, trọng số càng thấp. Tuy nhiên, điều này chỉ ảnh hưởng đến việc tính điểm trong ma trận, không ảnh hưởng đến việc loại bỏ tours đã xem.
 
-4. **Fallback logic quan trọng:** Khi dữ liệu sparse, co-occurrence giúp vẫn có recommendations.
+4. **Diversity giảm điểm cho tours quá giống nhau:** Giúp recommendations đa dạng hơn.
 
-5. **Denormalize trước khi trả về:** Điểm cuối cùng phải được denormalize để có ý nghĩa thực tế.
+5. **Fallback logic quan trọng:** Khi dữ liệu sparse, co-occurrence giúp vẫn có recommendations.
+
+6. **Denormalize trước khi trả về:** Điểm cuối cùng phải được denormalize để có ý nghĩa thực tế.
 
 ---
 
